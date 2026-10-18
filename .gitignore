@@ -1,0 +1,8 @@
+data/raw/
+data/private/
+*.pt
+*.onnx
+*.dat
+.ipynb_checkpoints/
+__pycache__/
+.DS_Store
