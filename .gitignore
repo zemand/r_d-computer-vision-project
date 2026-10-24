@@ -1,5 +1,6 @@
 data/raw/
 data/private/
+data/synthetic/
 *.pt
 *.onnx
 *.dat
