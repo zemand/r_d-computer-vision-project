@@ -1,10 +1,11 @@
 """Дані: синтетичні баркоди з відомим вмістом, твої фото, Arte-Lab."""
 
-import csv
+import itertools
 from pathlib import Path
 
 import cv2
 import numpy as np
+import pandas as pd
 import zxingcpp
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -21,46 +22,32 @@ ZXING_FORMATS = {
 }
 
 
-def ean13_checksum(digits12):
-    """Контрольна цифра EAN-13 для рядка з 12 цифр."""
-    total = 0
-    for position in range(12):
-        digit = int(digits12[position])
-        # непарні позиції (1, 3, 5...) з вагою 1, парні з вагою 3
-        if position % 2 == 0:
-            total = total + digit
-        else:
-            total = total + digit * 3
-    return str((10 - total % 10) % 10)
-
-
 def make_text(code_format, rng):
     """Випадковий вміст коду потрібного формату."""
     if code_format == "EAN13":
-        # 482 = префікс GS1 України; не починаємо з 0, щоб zxing не сприйняв як UPC-A
-        digits = "482"
-        for _ in range(9):
-            digits = digits + str(rng.integers(0, 10))
-        return digits + ean13_checksum(digits)
+        # 482 = префікс GS1 України; не починаємо з 0, щоб zxing не сприйняв як UPC-A.
+        # 12 цифр: 13-ту (контрольну) zxing-cpp додає сам
+        return "482" + "".join(rng.integers(0, 10, size=9).astype(str))
     if code_format == "CODE128":
         # схоже на номер відправлення: UA + 10 цифр
-        text = "UA"
-        for _ in range(10):
-            text = text + str(rng.integers(0, 10))
-        return text
+        return "UA" + "".join(rng.integers(0, 10, size=10).astype(str))
     if code_format == "QR":
         number = rng.integers(100000, 999999)
         return "https://example.com/item/" + str(number)
     raise ValueError("Невідомий формат: " + code_format)
 
 
-def render_code(text, code_format, module_px=3, border=40):
-    """Малює ідеальний код (сірий uint8, білий фон, поле навколо)."""
-    barcode = zxingcpp.create_barcode(text, ZXING_FORMATS[code_format])
+def barcode_to_image(barcode, module_px=3, border=40):
+    """Малює код zxing-cpp як ідеальне зображення (сірий uint8, біле поле навколо)."""
     image = np.array(barcode.to_image(scale=module_px))
-    image = cv2.copyMakeBorder(image, border, border, border, border,
-                               cv2.BORDER_CONSTANT, value=255)
-    return image
+    return cv2.copyMakeBorder(image, border, border, border, border,
+                              cv2.BORDER_CONSTANT, value=255)
+
+
+def render_code(text, code_format, module_px=3, border=40):
+    """Ідеальне зображення коду за його текстом."""
+    barcode = zxingcpp.create_barcode(text, ZXING_FORMATS[code_format])
+    return barcode_to_image(barcode, module_px, border)
 
 
 def camera_look(image, seed=0):
@@ -86,18 +73,15 @@ def generate_synthetic(n_per_format=20, seed=42):
     """
     rng = np.random.default_rng(seed)
     samples = []
-    for code_format in FORMATS:
-        for index in range(n_per_format):
-            text = make_text(code_format, rng)
-            image = render_code(text, code_format)
-            image = camera_look(image, seed=seed + index)
-            sample = {
-                "id": code_format + "_" + str(index).zfill(3),
-                "format": code_format,
-                "text": text,
-                "image": image,
-            }
-            samples.append(sample)
+    for code_format, index in itertools.product(FORMATS, range(n_per_format)):
+        barcode = zxingcpp.create_barcode(make_text(code_format, rng),
+                                          ZXING_FORMATS[code_format])
+        samples.append({
+            "id": code_format + "_" + str(index).zfill(3),
+            "format": code_format,
+            "text": barcode.text,      # повний текст (для EAN-13 з контрольною цифрою)
+            "image": camera_look(barcode_to_image(barcode), seed=seed + index),
+        })
     return samples
 
 
@@ -126,16 +110,14 @@ def load_own_photos(folder=None):
         print("Немає", labels_file, "- пропускаю власні фото")
         return []
 
-    labels = {}
-    with open(labels_file, newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            labels[row["product"]] = row
+    # dtype=str: щоб pandas не перетворив код 4820... на число і не загубив нулі
+    labels = pd.read_csv(labels_file, dtype=str).set_index("product")
 
     samples = []
     for path in sorted(folder.glob("*.jpg")):
         # can_01_dark -> product = can_01, light = dark
         name_parts = path.stem.rsplit("_", 1)
-        if len(name_parts) != 2 or name_parts[0] not in labels:
+        if len(name_parts) != 2 or name_parts[0] not in labels.index:
             print("Пропускаю (немає в labels.csv):", path.name)
             continue
         product, light = name_parts
@@ -143,15 +125,15 @@ def load_own_photos(folder=None):
         if image is None:
             print("Не вдалося прочитати:", path.name)
             continue
-        sample = {
+        label = labels.loc[product]
+        samples.append({
             "id": path.stem,
-            "format": labels[product]["format"].upper(),
-            "text": labels[product]["code"].strip(),
+            "format": label["format"].upper(),
+            "text": label["code"].strip(),
             "light": light,
-            "package": labels[product]["package"],
+            "package": label["package"],
             "image": resize_max_side(image),
-        }
-        samples.append(sample)
+        })
     return samples
 
 
@@ -195,14 +177,8 @@ def label_by_consensus(samples):
 
     labeled = []
     for sample in samples:
-        opencv_texts = []
-        for result in decode_opencv(sample["image"]):
-            if result["format"] == "EAN13":
-                opencv_texts.append(result["text"])
-        zxing_texts = []
-        for result in decode_zxing(sample["image"]):
-            if result["format"] == "EAN13":
-                zxing_texts.append(result["text"])
+        opencv_texts = [r["text"] for r in decode_opencv(sample["image"]) if r["format"] == "EAN13"]
+        zxing_texts = [r["text"] for r in decode_zxing(sample["image"]) if r["format"] == "EAN13"]
         if len(opencv_texts) == 1 and opencv_texts == zxing_texts:
             new_sample = dict(sample)
             new_sample["text"] = opencv_texts[0]

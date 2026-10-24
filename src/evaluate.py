@@ -1,5 +1,6 @@
 """Оцінка: проганяємо зразки через пошкодження, методи й декодери -> таблиця."""
 
+import itertools
 import time
 import zlib
 
@@ -16,9 +17,8 @@ def check(results, true_text):
     """'correct' / 'wrong' (прочитав, але не те) / 'none' (нічого не прочитав)."""
     if len(results) == 0:
         return "none"
-    for result in results:
-        if result["text"] == true_text:
-            return "correct"
+    if any(result["text"] == true_text for result in results):
+        return "correct"
     return "wrong"
 
 
@@ -75,14 +75,10 @@ def run_benchmark(samples, methods, degradations=None, levels=None,
     if levels is None:
         levels = LEVELS
 
-    # спершу складаємо список усіх варіантів кадрів
-    jobs = []
-    for sample in samples:
-        if include_clean:
-            jobs.append((sample, "clean", 0))
-        for degradation in degradations:
-            for level in levels:
-                jobs.append((sample, degradation, level))
+    # усі варіанти кадрів: (зразок, пошкодження, рівень) = декартів добуток списків
+    jobs = list(itertools.product(samples, degradations, levels))
+    if include_clean:
+        jobs = [(sample, "clean", 0) for sample in samples] + jobs
 
     rows = []
     for sample, degradation, level in tqdm(jobs, desc="benchmark"):
@@ -96,12 +92,9 @@ def run_benchmark(samples, methods, degradations=None, levels=None,
         for method_name in methods:
             image_rows = evaluate_image(image, sample["text"], sample["format"],
                                         method_name, decoder_names)
-            for row in image_rows:
-                row["sample"] = sample["id"]
-                row["format"] = sample["format"]
-                row["degradation"] = degradation
-                row["level"] = level
-                rows.append(row)
+            info = {"sample": sample["id"], "format": sample["format"],
+                    "degradation": degradation, "level": level}
+            rows.extend({**row, **info} for row in image_rows)
     return pd.DataFrame(rows)
 
 

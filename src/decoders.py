@@ -29,32 +29,21 @@ def normalize_format(name):
 
 def decode_opencv(image):
     ok, texts, types, points = _opencv_detector.detectAndDecodeWithType(image)
-    results = []
     if not ok:
-        return results
-    for index in range(len(texts)):
-        # OpenCV може знайти баркод, але не прочитати: тоді текст порожній
-        if texts[index] != "":
-            results.append({"text": texts[index],
-                            "format": normalize_format(types[index])})
-    return results
+        return []
+    # OpenCV може знайти баркод, але не прочитати: тоді текст порожній
+    return [{"text": text, "format": normalize_format(kind)}
+            for text, kind in zip(texts, types) if text != ""]
 
 
 def decode_wechat(image):
     texts, points = _wechat_detector.detectAndDecode(image)
-    results = []
-    for text in texts:
-        if text != "":
-            results.append({"text": text, "format": "QR"})
-    return results
+    return [{"text": text, "format": "QR"} for text in texts if text != ""]
 
 
 def decode_zxing(image):
-    results = []
-    for barcode in zxingcpp.read_barcodes(image):
-        results.append({"text": barcode.text,
-                        "format": normalize_format(barcode.format)})
-    return results
+    return [{"text": barcode.text, "format": normalize_format(barcode.format)}
+            for barcode in zxingcpp.read_barcodes(image)]
 
 
 DECODERS = {
@@ -66,8 +55,4 @@ DECODERS = {
 
 def decoders_for(code_format):
     """Назви декодерів, які підтримують цей формат."""
-    names = []
-    for name in DECODERS:
-        if code_format in SUPPORTED[name]:
-            names.append(name)
-    return names
+    return [name for name in DECODERS if code_format in SUPPORTED[name]]
