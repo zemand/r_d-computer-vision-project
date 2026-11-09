@@ -1,51 +1,64 @@
 # Robustness in Industrial Computer Vision
 
-CNN-реставрація кадру перед декодером, щоб баркоди/QR читались при поганому світлі,
-відблисках, шумі й розмитті.
+CNN-реставрація кадру як друга спроба для баркодів, які не прочитались (No Read) через
+погане світло, відблиски, шум і розмиття.
 
 ## Задача
 
-На лініях сортування і складах частина баркодів дає **No Read** через темряву, нерівне
-світло, відблиски, шум і розмиття. Мета: підняти **decode rate** (частку правильно
-прочитаних кодів), не змінюючи сам декодер.
+На лініях сортування і складах частина баркодів дає **No Read**, і коробка йде в Reject.
+Мета: підняти **decode rate** (частку правильно прочитаних кодів), не змінюючи сам декодер,
+і перевірити, чи CNN дає більше, ніж класична обробка, яку вже вміє промислова камера.
 
 ## Підхід
 
 ```
-кадр -> U-Net (реставрація) -> декодер (zxing-cpp / OpenCV / WeChat QR) -> рядок
+кадр -> декодер                          raw
+     -> No Read -> CLAHE -> декодер       camera (імітація фільтрів камери)
+     -> No Read -> U-Net -> декодер       camera→cnn
 ```
 
-- **U-Net** — маленький denoising convolutional encoder-decoder (~1.9 млн параметрів)
+- **camera**: легке розмиття, CLAHE (локальне вирівнювання контрасту) і підвищення різкості.
+  Параметри підібрані на train-фото.
+- **U-Net**: маленький denoising convolutional encoder-decoder (~1.9 млн параметрів)
   зі skip connections, які зберігають тонкі смуги коду.
-- **Навчання** на парах (зіпсований, чистий) із синтетичних кодів, реальних фото або їх суміші: 7 типів пошкоджень ×
-  5 рівнів (`dark`, `uneven`, `glare`, `noise`, `motion_blur`, `defocus`, `jpeg`).
-  ~10-12 хв на модель на Mac Mini M4 (MPS).
-- **raw→cnn**: спершу читаємо сирий кадр, CNN запускаємо лише при No Read.
+- **Навчання** на парах (зіпсований, чистий): 7 типів пошкоджень × 5 рівнів (`dark`, `uneven`,
+  `glare`, `noise`, `motion_blur`, `defocus`, `jpeg`). Дві моделі: **syn** (лише синтетика)
+  і **mix** (синтетика + реальні фото навпіл). ~12 хв на модель на Mac Mini M4 (MPS).
+- Декодери: zxing-cpp (усі формати), OpenCV barcode (EAN-13/EAN-8), WeChat QR.
 
 ## Структура
 
 ```
 src/
-  data.py          синтетичні коди, пари для навчання, Arte-Lab
+  data.py          синтетичні коди, пари для навчання, реальні фото і їх розмітка
   degradations.py  7 типів пошкоджень × 5 рівнів
   decoders.py      zxing-cpp, OpenCV barcode, WeChat QR -> один формат
   model.py         U-Net і restore() для кадру будь-якого розміру
 scripts/
-  download_artelab.py   завантаження Arte-Lab у data/raw/artelab/
+  download_artelab.py   Arte-Lab -> data/raw/artelab/
+  download_kaggle.py    ParcelBar, InventBar -> data/raw/parcelbar/, data/raw/inventbar/
 notebooks/
-  01_train.ipynb        навчання трьох моделей -> models/unet_{synthetic,artelab,mix}.pt
-  02_evaluate.ipynb     raw / cnn / raw→cnn для трьох моделей на Arte-Lab test і синтетиці
-results/                CSV і графіки з 02_evaluate
+  01_train.ipynb        навчання syn і mix -> models/unet_{synthetic,mix}.pt
+  02_evaluate.ipynb     raw / camera / camera→cnn на реальних фото і синтетиці
+results/                CSV і графіки з 01 і 02
 ```
 
 ## Дані
 
-| Джерело | Що | Ліцензія |
-|---|---|---|
-| Синтетика (`src/data.py`) | EAN-13, Code128, QR з відомим вмістом; train seed 1, test seed 2 | власні |
-| [Arte-Lab 1D barcode extended](https://artelab.dista.uninsubria.it/downloads/datasets/barcode/hough_barcode_1d/hough_barcode_1d.html) | фото EAN-13; поділ за товаром: train 167, test 87 | CC BY 3.0; Zamberletti, Gallo, Albertini, *Robust Angle Invariant 1D Barcode Detection*, ACPR 2013 |
+| Джерело | Що | Фото (train / test) | Ліцензія |
+|---|---|---|---|
+| Синтетика (`src/data.py`) | EAN-13, Code128, QR з відомим вмістом | 900 / 90 | власні |
+| [Arte-Lab 1D barcode extended](https://artelab.dista.uninsubria.it/downloads/datasets/barcode/hough_barcode_1d/hough_barcode_1d.html) | товари, EAN-13 | 166 / 81 | CC BY 3.0; Zamberletti, Gallo, Albertini, *Robust Angle Invariant 1D Barcode Detection*, ACPR 2013 |
+| [ParcelBar](https://www.kaggle.com/datasets/chommaphatma/inventbar-and-parcelbar-benchmarkbarcodedatasets) | посилки, Code128 | 128 / 55 | CC BY-SA 4.0 |
+| [InventBar](https://www.kaggle.com/datasets/chommaphatma/inventbar-and-parcelbar-benchmarkbarcodedatasets) | товари на складі, EAN-13, Code128, Code39 | 291 / 125 | CC BY-SA 4.0 |
 
-Зображення і модель у git не зберігаються (`data/raw/`, `models/`).
+ParcelBar і InventBar: Kamnardsiri, Charoenkwan, Malang, Wudhikarn, *1D Barcode Detection:
+Novel Benchmark Datasets and Comprehensive Comparison of Deep Convolutional Neural Network
+Approaches*, Sensors 22(22), 8788, 2022.
+
+Вміст кодів у наборах не вказано: правильна відповідь = те, що zxing-cpp прочитав на оригіналі
+(для EAN-13/EAN-8 разом з OpenCV). Train і test поділені за кодом: жоден товар не потрапляє
+в обидві частини. Зображення і моделі в git не зберігаються (`data/raw/`, `models/`).
 
 ## Як запустити
 
@@ -53,36 +66,48 @@ results/                CSV і графіки з 02_evaluate
 source ~/venvs/cv/bin/activate
 pip install -r requirements.txt
 python scripts/download_artelab.py     # один раз
+python scripts/download_kaggle.py      # один раз
 jupyter lab notebooks/                 # 01_train -> 02_evaluate
 ```
 
 ## Результати
 
-Три моделі з однаковою архітектурою: **syn** вчилась на синтетиці, **real** на 167 фото
-Arte-Lab (28 товарів), **mix** на синтетиці й цих фото навпіл. Тест: 87 інших фото Arte-Lab
-(19 товарів, жоден не з train), чисті + 7 пошкоджень × 5 рівнів.
+Тест: 261 реальне фото (чисті + 7 пошкоджень × рівні 1, 3, 5), коди, яких модель не бачила.
 
 | Метод | zxing-cpp | OpenCV | хибні декоди (OpenCV) |
 |---|---|---|---|
-| raw | 45% | 56% | 0.4% |
-| raw→cnn_syn | 69% | 69% | 3.0% |
-| raw→cnn_real | 66% | 65% | 0.8% |
-| raw→cnn_mix | 68% | **70%** | **0.8%** |
+| raw | 47.0% | 57.0% | 0.5% |
+| camera (CLAHE) | 61.0% | 63.7% | 0.7% |
+| camera→cnn_syn | 69.0% | 70.9% | 2.1% |
+| **camera→cnn_mix** | **69.0%** | 69.7% | **1.3%** |
 
 ![decode rate](results/fig_overall.png)
 ![приклади](results/examples.png)
 
-- Приріст +20-25 п.п.; найбільше на темряві, нерівному світлі, шумі, JPEG.
-- mix: decode rate як у syn, хибних декодів мало, як у real. syn "домальовує" текстури на фоні.
-- Розмиття (defocus, motion_blur) на реальних фото не виправляє жодна модель.
-- Вибір: raw→cnn_mix. Час CNN ~25 мс на фото 640×480 (Mac Mini M4, MPS), лише для кадрів з No Read.
+- Класична обробка дає +14 п.п., CNN додає ще +8 п.п. і повертає 21% кадрів, які не прочитала камера.
+- syn і mix читають однаково, але mix удвічі рідше дає хибні декоди: syn домальовує текстури фону.
+  Модель для лінії: mix.
+- Найбільше CNN допомагає з освітленням і шумом: нерівне світло 82→96%, шум 61→80%.
+- CNN запускається лише при No Read камери; весь ланцюжок для такого кадру ~35 мс (Mac Mini M4, MPS).
 
-Застосування: доповнення до промислового зчитувача, друга спроба для кадрів з No Read.
+### Чому не 100%
+
+![невдачі](results/fig_failures.png)
+
+- 58% усіх невдач дає розмиття (`defocus`, `motion_blur`) з рівня 3: смуги шириною 2–3 пікселі
+  зливаються в сірий, інформації для відновлення немає.
+- Рівень 5 темряви й відблиску: смуги тонуть у чорному або засвічені до білого.
+- На рівнях 1–3 освітлення, шуму і JPEG після CNN не читається лише 4% кадрів.
+
+Такі кадри виправляє обладнання (роздільність, коротка витримка, світло), а не обробка.
 
 ## Обмеження
 
-- Мало реальних даних: 254 фото, 47 товарів; тест 87 фото, тому різниця в 2-3 п.п. ненадійна.
-- Arte-Lab не містить вмісту кодів: правильна відповідь = консенсус OpenCV і zxing-cpp
-  на оригіналі, тому в наборі лишаються переважно легкі фото.
-- Пошкодження на Arte-Lab штучні (накладені на реальні фото).
+- "camera" лише імітує обробку зчитувача. Справжній зчитувач має сильніший декодер і кілька
+  кадрів на коробку, тому приріст на лінії може бути меншим.
+- Правильна відповідь береться з декодерів на оригіналі, тому в наборі лишаються переважно
+  фото, які читаються; у Code39 контрольна сума необов'язкова, тож мітки трохи менш надійні.
+- Пошкодження штучні (накладені на реальні фото).
+- Обробка перед CNN (медіанний, білатеральний фільтри, гамма, CLAHE) приросту не дала:
+  мережа сама навчилась цієї обробки.
 - Нахил і перспективу CNN не виправляє.

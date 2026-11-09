@@ -12,8 +12,10 @@ from src.degradations import DEGRADATIONS, LEVELS
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 
-# Формати, з якими працюємо (назви однакові в усьому проєкті)
+# Формати синтетики (назви однакові в усьому проєкті)
 FORMATS = ["EAN13", "CODE128", "QR"]
+# На реальних фото беремо ще й складські Code39 та короткі EAN-8
+REAL_FORMATS = FORMATS + ["CODE39", "EAN8"]
 
 # Відповідність наших назв форматам zxing-cpp
 ZXING_FORMATS = {
@@ -110,7 +112,7 @@ def make_training_batch(samples, batch_size, rng, crop=128):
     return inputs, targets
 
 
-def resize_max_side(image, max_side=1280):
+def resize_max_side(image, max_side=1600):
     """Зменшує велике фото, зберігаючи пропорції."""
     height, width = image.shape[:2]
     biggest = max(height, width)
@@ -121,27 +123,34 @@ def resize_max_side(image, max_side=1280):
     return cv2.resize(image, new_size, interpolation=cv2.INTER_AREA)
 
 
-def load_artelab(folder=None, limit=None):
-    """Фото EAN-13 з Arte-Lab (без масок). Вміст коду невідомий: text = None."""
-    if folder is None:
-        folder = DATA_DIR / "raw" / "artelab"
-    folder = Path(folder)
+# Реальні фото: назва набору -> папка в data/raw/ і скрипт завантаження
+PHOTO_SETS = {
+    "artelab": "scripts/download_artelab.py",      # EAN-13, CC BY 3.0
+    "parcelbar": "scripts/download_kaggle.py",     # Code128 на посилках, CC BY-SA 4.0
+    "inventbar": "scripts/download_kaggle.py",     # товари на складі, CC BY-SA 4.0
+}
+
+
+def load_photos(name, limit=None):
+    """Сірі фото набору з data/raw/<name>/. Вміст кодів невідомий: text = None."""
+    folder = DATA_DIR / "raw" / name
     if not folder.exists():
-        print("Немає", folder, "- запусти scripts/download_artelab.py")
+        print("Немає", folder, "- запусти", PHOTO_SETS[name])
         return []
 
     samples = []
     paths = sorted(folder.rglob("*.jpg")) + sorted(folder.rglob("*.png"))
     for path in paths:
-        # маски детекції лежать поруч з фото, їх пропускаємо
+        # маски детекції Arte-Lab лежать поруч з фото, їх пропускаємо
         if "mask" in str(path).lower() or "detection" in path.parent.name.lower():
             continue
         image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
         if image is None:
             continue
         samples.append({
-            "id": path.stem,
-            "format": "EAN13",
+            "id": name + "_" + path.stem,
+            "source": name,
+            "format": None,
             "text": None,
             "image": resize_max_side(image),
         })
@@ -150,24 +159,47 @@ def load_artelab(folder=None, limit=None):
     return samples
 
 
-def label_by_consensus(samples):
-    """Для фото без відомого вмісту (Arte-Lab): правильна відповідь = те, що
-    OpenCV і zxing-cpp ОДНОСТАЙНО прочитали на оригіналі.
+def label_photos(samples):
+    """Правильна відповідь для фото без відомого вмісту.
 
-    Фото, які прочитав лише один декодер або жоден, відкидаємо.
-    Обмеження: набір зсувається в бік "легких" фото.
+    Беремо фото, де zxing-cpp прочитав на оригіналі рівно ОДИН код з REAL_FORMATS.
+    Для EAN-13 і EAN-8 вимагаємо ще й згоди OpenCV (консенсус двох декодерів).
+    Code128 і QR читає лише zxing, але в них вбудована перевірка (контрольна сума / корекція
+    помилок), тому хибне читання на чистому оригіналі малоймовірне. У Code39 контрольна
+    сума необов'язкова, тож ризик трохи вищий.
+
+    Фото без відповіді відкидаємо. Обмеження: набір зсувається в бік "легких" фото.
+    Ці ж фото — хороші цілі для навчання: оригінал, який читається, достатньо чистий.
     """
     from src.decoders import decode_opencv, decode_zxing
 
     labeled = []
     for sample in samples:
-        opencv_texts = [r["text"] for r in decode_opencv(sample["image"]) if r["format"] == "EAN13"]
-        zxing_texts = [r["text"] for r in decode_zxing(sample["image"]) if r["format"] == "EAN13"]
-        if len(opencv_texts) == 1 and opencv_texts == zxing_texts:
-            new_sample = dict(sample)
-            new_sample["text"] = opencv_texts[0]
-            labeled.append(new_sample)
+        results = decode_zxing(sample["image"])
+        if len(results) != 1 or results[0]["format"] not in REAL_FORMATS:
+            continue
+        text, code_format = results[0]["text"], results[0]["format"]
+        if code_format in ["EAN13", "EAN8"]:
+            opencv_texts = [r["text"] for r in decode_opencv(sample["image"])]
+            if opencv_texts != [text]:
+                continue
+        new_sample = dict(sample)
+        new_sample["text"] = text
+        new_sample["format"] = code_format
+        labeled.append(new_sample)
     return labeled
+
+
+def load_real_split(test_part=0.3, seed=0):
+    """Усі три набори: фото з відповіддю, поділені на train і test окремо в кожному наборі."""
+    train, test = [], []
+    for name in PHOTO_SETS:
+        labeled = label_photos(load_photos(name))
+        name_train, name_test = split_by_code(labeled, test_part, seed)
+        print(f"{name}: {len(labeled)} фото з відповіддю -> train {len(name_train)}, test {len(name_test)}")
+        train += name_train
+        test += name_test
+    return train, test
 
 
 def split_by_code(samples, test_part=0.3, seed=0):

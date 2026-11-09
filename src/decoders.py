@@ -13,9 +13,9 @@ _wechat_detector = cv2.wechat_qrcode_WeChatQRCode()
 
 # Які формати вміє кожен декодер (OpenCV barcode: лише EAN/UPC)
 SUPPORTED = {
-    "opencv": ["EAN13"],
+    "opencv": ["EAN13", "EAN8"],
     "wechat": ["QR"],
-    "zxing": ["EAN13", "CODE128", "QR"],
+    "zxing": ["EAN13", "EAN8", "CODE128", "CODE39", "QR"],
 }
 
 
