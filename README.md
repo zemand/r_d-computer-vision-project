@@ -18,7 +18,10 @@ CNN-реставрація кадру як друга спроба для бар
 ```
 
 - **camera**: легке розмиття, CLAHE (локальне вирівнювання контрасту) і підвищення різкості.
-  Параметри підібрані на train-фото.
+  Параметри підібрані на train-фото. Імітує вбудовані фільтри промислового зчитувача: у Cognex
+  DataMan це Equalize (вирівнювання гістограми; CLAHE — його локальна версія), Low Pass, Stretch
+  і морфологія ([документація Cognex](https://docs.cognex.com/dmst_617/web/EN/DM360_Manual/Content/Topics/DM300_360_470_Manual/ImgFiltering.htm)).
+  Декодери Cognex (1DMax з Hotbars II, 2DMax з PowerGrid) закриті, тому тут zxing-cpp і OpenCV.
 - **U-Net**: маленький denoising convolutional encoder-decoder (~1.9 млн параметрів)
   зі skip connections, які зберігають тонкі смуги коду.
 - **Навчання** на парах (зіпсований, чистий): 7 типів пошкоджень × 5 рівнів (`dark`, `uneven`,
