@@ -56,3 +56,12 @@ DECODERS = {
 def decoders_for(code_format):
     """Назви декодерів, які підтримують цей формат."""
     return [name for name in DECODERS if code_format in SUPPORTED[name]]
+
+
+def check(results, true_text):
+    """'correct' / 'wrong' (прочитав, але не те) / 'none' (нічого не прочитав)."""
+    if len(results) == 0:
+        return "none"
+    if any(result["text"] == true_text for result in results):
+        return "correct"
+    return "wrong"

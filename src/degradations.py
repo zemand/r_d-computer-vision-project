@@ -1,4 +1,4 @@
-"""Стенд пошкоджень: 8 типів × 5 рівнів сили (за зразком ImageNet-C).
+"""Стенд пошкоджень: 7 типів × 5 рівнів сили (за зразком ImageNet-C).
 
 Кожна функція: (сіре зображення uint8, рівень 1..5, seed) -> пошкоджене зображення.
 Рівень 1 = ледь помітно, 5 = дуже сильно. Параметри рівнів у таблицях нижче:
@@ -78,20 +78,6 @@ def jpeg(image, level, seed=0):
     return cv2.imdecode(encoded, cv2.IMREAD_GRAYSCALE)
 
 
-def perspective(image, level, seed=0):
-    """Нахил камери: прямокутник коду стає трапецією (лекція 7)."""
-    shift_part = [0.05, 0.10, 0.15, 0.20, 0.25][level - 1]
-    height, width = image.shape
-    shift = width * shift_part
-    source = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
-    # праву сторону "відсуваємо" від камери: вона стає коротшою
-    target = np.float32([[0, 0], [width, shift], [width, height - shift], [0, height]])
-    matrix = cv2.getPerspectiveTransform(source, target)
-    # краї заповнюємо сусідніми пікселями: біле 255 виглядало б як відблиск
-    return cv2.warpPerspective(image, matrix, (width, height),
-                               borderMode=cv2.BORDER_REPLICATE)
-
-
 DEGRADATIONS = {
     "dark": dark,
     "uneven": uneven,
@@ -100,5 +86,4 @@ DEGRADATIONS = {
     "motion_blur": motion_blur,
     "defocus": defocus,
     "jpeg": jpeg,
-    "perspective": perspective,
 }

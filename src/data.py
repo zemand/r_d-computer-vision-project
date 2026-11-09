@@ -1,12 +1,13 @@
-"""Дані: синтетичні баркоди з відомим вмістом, твої фото, Arte-Lab."""
+"""Дані: синтетичні баркоди з відомим вмістом, пари для навчання, Arte-Lab."""
 
 import itertools
 from pathlib import Path
 
 import cv2
 import numpy as np
-import pandas as pd
 import zxingcpp
+
+from src.degradations import DEGRADATIONS, LEVELS
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
@@ -44,49 +45,73 @@ def barcode_to_image(barcode, module_px=3, border=40):
                               cv2.BORDER_CONSTANT, value=255)
 
 
-def render_code(text, code_format, module_px=3, border=40):
-    """Ідеальне зображення коду за його текстом."""
-    barcode = zxingcpp.create_barcode(text, ZXING_FORMATS[code_format])
-    return barcode_to_image(barcode, module_px, border)
-
-
 def camera_look(image, seed=0):
-    """Робить ідеальний код схожим на кадр камери: реальні рівні, розмиття, шум.
+    """Робить ідеальний код схожим на кадр камери: реальні рівні, легке розмиття, шум.
 
-    - Папір на фото не буває ідеально білим (255), а фарба ідеально чорною (0):
-      беремо приблизно 230 і 30. Інакше білий фон виглядає як "пересвіт".
-    - Без легкого розмиття детектор OpenCV не бачить ідеально різкі коди
-      (перевірено на початку проєкту), і baseline виходить хибно поганим.
+    Папір на фото не ідеально білий (255), фарба не ідеально чорна (0): беремо ~230 і ~30.
+    Без легкого розмиття детектор OpenCV не бачить ідеально різкі коди.
     """
     rng = np.random.default_rng(seed)
     levels = 30 + image.astype(np.float32) * (200.0 / 255.0)
     blurred = cv2.GaussianBlur(levels, (3, 3), 0)
-    noise = rng.normal(0, 2, image.shape)
-    result = blurred.astype(np.float32) + noise
+    result = blurred + rng.normal(0, 2, image.shape)
     return np.clip(result, 0, 255).astype(np.uint8)
 
 
-def generate_synthetic(n_per_format=20, seed=42):
+def generate_synthetic(n_per_format=20, seed=42, module_sizes=(2, 3, 4)):
     """Список зразків: по n кодів кожного формату, з відомим вмістом.
 
     Кожен зразок це словник: id, format, text, image.
+    module_sizes: товщина найтоншої смуги в пікселях (різний масштаб коду в кадрі).
     """
     rng = np.random.default_rng(seed)
     samples = []
     for code_format, index in itertools.product(FORMATS, range(n_per_format)):
         barcode = zxingcpp.create_barcode(make_text(code_format, rng),
                                           ZXING_FORMATS[code_format])
+        module_px = int(rng.choice(module_sizes))
         samples.append({
             "id": code_format + "_" + str(index).zfill(3),
             "format": code_format,
             "text": barcode.text,      # повний текст (для EAN-13 з контрольною цифрою)
-            "image": camera_look(barcode_to_image(barcode), seed=seed + index),
+            "image": camera_look(barcode_to_image(barcode, module_px), seed=seed + index),
         })
     return samples
 
 
+def make_training_batch(samples, batch_size, rng, crop=128):
+    """Пачка пар для навчання: (зіпсований шматок, чистий шматок), обидва float32 0..1.
+
+    Для кожної пари: випадковий код -> випадкове пошкодження і рівень (або без пошкодження,
+    щоб мережа вчилась не псувати хороші кадри) -> однаковий випадковий шматок crop×crop
+    з обох картинок -> випадковий поворот на 90° (смуги бувають і вертикальні, і горизонтальні).
+    Повертає масиви форми (batch, 1, crop, crop), як чекає PyTorch.
+    """
+    names = list(DEGRADATIONS) + ["clean"]
+    inputs = np.zeros((batch_size, 1, crop, crop), np.float32)
+    targets = np.zeros((batch_size, 1, crop, crop), np.float32)
+    for i in range(batch_size):
+        clean = samples[rng.integers(len(samples))]["image"]
+        name = names[rng.integers(len(names))]
+        if name == "clean":
+            damaged = clean
+        else:
+            level = int(rng.choice(LEVELS))
+            damaged = DEGRADATIONS[name](clean, level, seed=int(rng.integers(1_000_000)))
+
+        top = rng.integers(clean.shape[0] - crop + 1)
+        left = rng.integers(clean.shape[1] - crop + 1)
+        damaged = damaged[top:top + crop, left:left + crop]
+        clean = clean[top:top + crop, left:left + crop]
+
+        turns = int(rng.integers(4))
+        inputs[i, 0] = np.rot90(damaged, turns) / 255.0
+        targets[i, 0] = np.rot90(clean, turns) / 255.0
+    return inputs, targets
+
+
 def resize_max_side(image, max_side=1280):
-    """Зменшує велике фото з телефона, зберігаючи пропорції."""
+    """Зменшує велике фото, зберігаючи пропорції."""
     height, width = image.shape[:2]
     biggest = max(height, width)
     if biggest <= max_side:
@@ -96,49 +121,8 @@ def resize_max_side(image, max_side=1280):
     return cv2.resize(image, new_size, interpolation=cv2.INTER_AREA)
 
 
-def load_own_photos(folder=None):
-    """Твої фото з data/raw/own/ + labels.csv.
-
-    labels.csv: product,code,format,package (один рядок на товар).
-    Файли: <product>_<light>.jpg, наприклад can_01_dark.jpg.
-    """
-    if folder is None:
-        folder = DATA_DIR / "raw" / "own"
-    folder = Path(folder)
-    labels_file = folder / "labels.csv"
-    if not labels_file.exists():
-        print("Немає", labels_file, "- пропускаю власні фото")
-        return []
-
-    # dtype=str: щоб pandas не перетворив код 4820... на число і не загубив нулі
-    labels = pd.read_csv(labels_file, dtype=str).set_index("product")
-
-    samples = []
-    for path in sorted(folder.glob("*.jpg")):
-        # can_01_dark -> product = can_01, light = dark
-        name_parts = path.stem.rsplit("_", 1)
-        if len(name_parts) != 2 or name_parts[0] not in labels.index:
-            print("Пропускаю (немає в labels.csv):", path.name)
-            continue
-        product, light = name_parts
-        image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
-        if image is None:
-            print("Не вдалося прочитати:", path.name)
-            continue
-        label = labels.loc[product]
-        samples.append({
-            "id": path.stem,
-            "format": label["format"].upper(),
-            "text": label["code"].strip(),
-            "light": light,
-            "package": label["package"],
-            "image": resize_max_side(image),
-        })
-    return samples
-
-
 def load_artelab(folder=None, limit=None):
-    """Фото EAN-13 з Arte-Lab (без маски). Вміст коду невідомий: text = None."""
+    """Фото EAN-13 з Arte-Lab (без масок). Вміст коду невідомий: text = None."""
     if folder is None:
         folder = DATA_DIR / "raw" / "artelab"
     folder = Path(folder)
@@ -171,7 +155,7 @@ def label_by_consensus(samples):
     OpenCV і zxing-cpp ОДНОСТАЙНО прочитали на оригіналі.
 
     Фото, які прочитав лише один декодер або жоден, відкидаємо.
-    Обмеження: набір зсувається в бік "легких" фото (на Arte-Lab лишається ~260 з 365).
+    Обмеження: набір зсувається в бік "легких" фото.
     """
     from src.decoders import decode_opencv, decode_zxing
 
@@ -184,3 +168,27 @@ def label_by_consensus(samples):
             new_sample["text"] = opencv_texts[0]
             labeled.append(new_sample)
     return labeled
+
+
+def split_by_code(samples, test_part=0.3, seed=0):
+    """Ділить фото на train і test так, щоб один товар (код) був лише в одній частині.
+
+    В Arte-Lab той самий товар знято багато разів (254 фото, 47 кодів). Якщо ділити
+    за файлами, мережа бачила б у train майже ті самі кадри, що в test, і результат
+    був би завищений.
+    """
+    codes = sorted(set(sample["text"] for sample in samples))
+    rng = np.random.default_rng(seed)
+    rng.shuffle(codes)
+
+    test_codes = set()
+    test_count = 0
+    for code in codes:
+        if test_count >= test_part * len(samples):
+            break
+        test_codes.add(code)
+        test_count += sum(sample["text"] == code for sample in samples)
+
+    train = [sample for sample in samples if sample["text"] not in test_codes]
+    test = [sample for sample in samples if sample["text"] in test_codes]
+    return train, test
